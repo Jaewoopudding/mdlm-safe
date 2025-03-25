@@ -8,6 +8,7 @@ import shutil
 import typing
 import urllib
 import zipfile
+from functools import partial
 
 import datasets
 import fsspec
@@ -370,17 +371,24 @@ def get_dataset(
       'ag_news',
       cache_dir=cache_dir,
       streaming=streaming)
+  elif dataset_name == 'datamol-io/safe-gpt':
+    dataset = datasets.load_dataset(
+      dataset_name,
+      cache_dir=cache_dir,
+      streaming=streaming,
+      split='validation')
   else:
     dataset = datasets.load_dataset(
       dataset_name,
       cache_dir=cache_dir,
       streaming=streaming)
 
-  if dataset_name in ['lambada', 'openwebtext-train',
-                      'openwebtext-valid']:
-    data = dataset
-  else:
-    data = dataset[mode]
+  # if dataset_name in ['lambada', 'openwebtext-train',
+  #                     'openwebtext-valid']:
+  #   data = dataset
+  # else:
+  #   data = dataset[mode]
+  data = dataset # for debug
 
   if dataset_name.startswith('wikitext'):
     detokenizer = wt_detokenizer
@@ -437,18 +445,70 @@ def get_dataset(
                          return_token_type_ids=True)
     return tokens
 
-  if streaming:
-    tokenized_dataset = data.map(
-      preprocess_and_tokenize,
-      batched=True,
-      desc='Tokenizing')
-  else:
-    tokenized_dataset = data.map(
-      preprocess_and_tokenize,
-      batched=True,
-      num_proc=num_proc,
-      load_from_cache_file=True,
-      desc='Tokenizing')
+  def tokenize_fn(
+      row,
+      tokenizer,
+      tokenize_column = "inputs",
+      max_length = None,
+      padding: bool = False,
+  ):
+      """Perform the tokenization of a row
+      Args:
+          row: row to tokenize
+          tokenizer: tokenizer to use
+          tokenize_column: column to tokenize
+          max_length: maximum size of the tokenized sequence
+          padding: whether to pad the sequence
+      """
+      # there's probably a way to do this with the tokenizer settings
+      # but again, gotta move fast
+
+      fast_tokenizer = (
+          tokenizer
+      )
+
+      return fast_tokenizer(
+          row[tokenize_column],
+          truncation=(max_length is not None),
+          max_length=max_length,
+          padding=padding,
+          return_tensors=None,
+      )
+  
+  # SAFE code
+  breakpoint()
+  raw_datasets = datasets.load_dataset(dataset_name, cache_dir=cache_dir,streaming=streaming,split='test',num_proc=32)
+  
+  raw_datasets.map(partial(tokenize_fn,tokenizer=tokenizer,tokenize_column='input',max_length=block_size,),batched=True,remove_columns=None,)
+    
+  tokenized_dataset = data.map(
+    partial(
+      tokenize_fn,
+      tokenizer=tokenizer,
+      tokenize_column='input',
+      max_length=block_size,
+      ),
+    batched=True,
+    num_proc=num_proc,
+    load_from_cache_file=True,
+    desc='Tokenizing')
+
+
+
+  # MDLM code 
+  # if streaming:
+  #   tokenized_dataset = data.map(
+  #     preprocess_and_tokenize,
+  #     batched=True,
+  #     # desc='Tokenizing'
+  #     )
+  # else:
+  #   tokenized_dataset = data.map(
+  #     preprocess_and_tokenize,
+  #     batched=True,
+  #     num_proc=num_proc,
+  #     load_from_cache_file=True,
+  #     desc='Tokenizing')
   if dataset_name == 'ptb':
     tokenized_dataset = tokenized_dataset.remove_columns(
       'sentence')
@@ -472,7 +532,8 @@ def get_dataset(
     chunked_dataset = tokenized_dataset.map(
       group_texts,
       batched=True,
-      desc='Grouping')
+      desc='Grouping'
+      )
   else:
     chunked_dataset = tokenized_dataset.map(
       group_texts,
@@ -491,6 +552,9 @@ def get_tokenizer(config):
   elif config.data.tokenizer_name_or_path == 'bert-base-uncased':
     tokenizer = transformers.BertTokenizer.\
       from_pretrained('bert-base-uncased')
+  elif config.data.tokenizer_name_or_path == 'safe':
+    from safe_tokenizer import SAFETokenizer
+    tokenizer = SAFETokenizer.from_pretrained("datamol-io/safe-gpt").get_pretrained()
   else:
     tokenizer = transformers.AutoTokenizer.from_pretrained(
       config.data.tokenizer_name_or_path)
@@ -540,32 +604,48 @@ def get_dataloaders(config, tokenizer, skip_train=False,
     raise ValueError(
       f'Eval Batch Size for {config.eval.batch_size} '
       f'not divisible by {num_gpus}.')
-  if skip_train:
-    train_set = None
-  else:
-    train_set = get_dataset(
-      config.data.train,
-      tokenizer,
-      mode='train',
-      wrap=config.data.wrap,
-      cache_dir=config.data.cache_dir,
-      block_size=config.model.length)
   
-  if config.data.valid in ['text8', 'lm1b', 'ag_news']:
-    validation_split = 'test'
+  if True: ### GET ON THIS LINE ###
+    from safe_tokenizer import get_safe_dataset
+    dataset = get_safe_dataset(
+      config.data.train,
+      tokenizer = tokenizer,
+      cache_dir = config.data.cache_dir,
+      streaming = False,
+      tokenize_column = "input",
+      property_column = None,
+      max_length = None,
+    )
+    train_set = dataset['train']
+    valid_set = dataset['valid']
+    
   else:
-    validation_split = 'validation'
-  if skip_valid:
-    valid_set = None
-  else:
-    valid_set = get_dataset(
-      config.data.valid,
-      tokenizer,
-      wrap=config.data.wrap,
-      mode=validation_split,
-      cache_dir=config.data.cache_dir,
-      block_size=config.model.length,
-      streaming=False)
+    if skip_train:
+      train_set = None
+    else:
+      train_set = get_dataset(
+        config.data.train,
+        tokenizer,
+        mode='train',
+        wrap=config.data.wrap,
+        cache_dir=config.data.cache_dir,
+        block_size=config.model.length)
+    
+    if config.data.valid in ['text8', 'lm1b', 'ag_news']:
+      validation_split = 'test'
+    else:
+      validation_split = 'validation'
+    if skip_valid:
+      valid_set = None
+    else:
+      valid_set = get_dataset(
+        config.data.valid,
+        tokenizer,
+        wrap=config.data.wrap,
+        mode=validation_split,
+        cache_dir=config.data.cache_dir,
+        block_size=config.model.length,
+        streaming=False)
 
   if skip_train:
     train_loader = None
@@ -704,3 +784,5 @@ class FaultTolerantDistributedSampler(torch.utils.data.DistributedSampler):
       yield index
 
     self.counter = 0
+    
+    
