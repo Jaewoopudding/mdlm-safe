@@ -67,7 +67,7 @@ trainer:
   devices: ${device_count:}
   accumulate_grad_batches: ${div_up:${loader.global_batch_size}, ${eval:${trainer.devices} * ${loader.batch_size} * ${trainer.num_nodes}}}
   gradient_clip_val: 1.0
-  precision: 'bf16'
+  precision: 'bf16-mixed'
   num_sanity_val_steps: 2
   max_steps: 1_000_000
   log_every_n_steps: 10
@@ -80,7 +80,7 @@ wandb:
   notes: Mulan for text
   group: null
   job_type: null
-  name: null
+  name: MDLM-${now:%Y.%m.%d}-${now:%H%M%S}
   id: ${.name}_${seed}
   tags:
     - ${noise.type}

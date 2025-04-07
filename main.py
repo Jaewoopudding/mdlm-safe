@@ -1,4 +1,5 @@
 import os
+import datetime
 
 import fsspec
 import hydra
@@ -11,6 +12,8 @@ import torch
 import dataloader
 import diffusion
 import utils
+
+torch.set_float32_matmul_precision('high')
 
 omegaconf.OmegaConf.register_new_resolver(
   'cwd', os.getcwd)
@@ -141,7 +144,7 @@ def _ppl_eval(config, logger, tokenizer):
     strategy=hydra.utils.instantiate(config.strategy),
     logger=wandb_logger)
   _, valid_ds = dataloader.get_dataloaders(
-    config, tokenizer, skip_train=True, valid_seed=config.seed)
+    config, streaming=False)
   trainer.validate(model, valid_ds)
 
 
@@ -167,12 +170,12 @@ def _train(config, logger, tokenizer):
     for _, callback in config.callbacks.items():
       callbacks.append(hydra.utils.instantiate(callback))
 
-  train_ds, valid_ds = dataloader.get_dataloaders(
-    config, tokenizer)
-  _print_batch(train_ds, valid_ds, tokenizer)
+  train_ds, _ = dataloader.get_dataloaders(
+    config, streaming=False)
+  # _print_batch(train_ds, train_ds, tokenizer)
 
   model = diffusion.Diffusion(
-    config, tokenizer=valid_ds.tokenizer)
+    config, tokenizer=tokenizer)
 
   trainer = hydra.utils.instantiate(
     config.trainer,
@@ -180,7 +183,9 @@ def _train(config, logger, tokenizer):
     callbacks=callbacks,
     strategy=hydra.utils.instantiate(config.strategy),
     logger=wandb_logger)
-  trainer.fit(model, train_ds, valid_ds, ckpt_path=ckpt_path)
+
+  trainer.fit(model, train_ds, ckpt_path=ckpt_path)
+  
 
 
 @hydra.main(version_base=None, config_path='configs',

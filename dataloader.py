@@ -476,7 +476,6 @@ def get_dataset(
       )
   
   # SAFE code
-  breakpoint()
   raw_datasets = datasets.load_dataset(dataset_name, cache_dir=cache_dir,streaming=streaming,split='test',num_proc=32)
   
   raw_datasets.map(partial(tokenize_fn,tokenizer=tokenizer,tokenize_column='input',max_length=block_size,),batched=True,remove_columns=None,)
@@ -496,19 +495,19 @@ def get_dataset(
 
 
   # MDLM code 
-  # if streaming:
-  #   tokenized_dataset = data.map(
-  #     preprocess_and_tokenize,
-  #     batched=True,
-  #     # desc='Tokenizing'
-  #     )
-  # else:
-  #   tokenized_dataset = data.map(
-  #     preprocess_and_tokenize,
-  #     batched=True,
-  #     num_proc=num_proc,
-  #     load_from_cache_file=True,
-  #     desc='Tokenizing')
+  if streaming:
+    tokenized_dataset = data.map(
+      preprocess_and_tokenize,
+      batched=True,
+      # desc='Tokenizing'
+      )
+  else:
+    tokenized_dataset = data.map(
+      preprocess_and_tokenize,
+      batched=True,
+      num_proc=num_proc,
+      load_from_cache_file=True,
+      desc='Tokenizing')
   if dataset_name == 'ptb':
     tokenized_dataset = tokenized_dataset.remove_columns(
       'sentence')
@@ -586,98 +585,138 @@ def get_tokenizer(config):
   return tokenizer
     
 
-def get_dataloaders(config, tokenizer, skip_train=False,
-                    skip_valid=False, valid_seed=None):
-  num_gpus = torch.cuda.device_count()
-  assert (config.loader.global_batch_size
-          == (config.loader.batch_size
-              * config.trainer.num_nodes
-              * num_gpus
-              * config.trainer.accumulate_grad_batches))
-  if config.loader.global_batch_size % (
-    num_gpus * config.trainer.accumulate_grad_batches) != 0:
-    raise ValueError(
-      f'Train Batch Size {config.training.batch_size}'
-      f'not divisible by {num_gpus} gpus with accumulation '
-      f'{config.trainer.accumulate_grad_batches}.')
-  if config.loader.eval_global_batch_size % num_gpus != 0:
-    raise ValueError(
-      f'Eval Batch Size for {config.eval.batch_size} '
-      f'not divisible by {num_gpus}.')
+class Collator:
+  def __init__(self, max_length):
+    from safe_tokenizer import SAFETokenizer
+    tk = SAFETokenizer.from_pretrained('datamol-io/safe-gpt')
+    self.tokenizer = tk.get_pretrained()
+    self.max_length = max_length
+        
+  def __call__(self, examples):
+    return self.tokenizer([example['input'] for example in examples],
+                          return_tensors='pt',
+                          max_length=self.max_length,
+                          padding=True,
+                          truncation=True)
+
+
+def get_dataloaders(config, streaming):
+  train_dataset = datasets.load_dataset('datamol-io/safe-gpt', cache_dir=config.data.cache_dir, streaming=streaming, split='train') ##TODO 
+  # valid_dataset = datasets.load_dataset('datamol-io/safe-gpt', cache_dir=config.data.cache_dir, streaming=streaming, split='test') ##TODO 
+  train_dataloader = torch.utils.data.DataLoader(
+    train_dataset, 
+    batch_size=config.loader.batch_size,
+    collate_fn=Collator(256),  # config.model.max_positional_embeddings
+    shuffle=not streaming,
+    num_workers=config.loader.num_workers,
+    pin_memory=config.loader.pin_memory,
+    persistent_workers=True,
+    drop_last=True
+  ) 
+  # valid_dataloader = torch.utils.data.DataLoader(
+  #   valid_dataset, 
+  #   batch_size=config.loader.batch_size,
+  #   collate_fn=Collator(256),  
+  #   shuffle=False,
+  #   num_workers=config.loader.num_workers,
+  #   pin_memory=config.loader.pin_memory,
+  #   persistent_workers=True
+  # ) 
+
+  return train_dataloader, []
+
+# def get_dataloaders(config, tokenizer, skip_train=False,
+#                     skip_valid=False, valid_seed=None):
+#   num_gpus = torch.cuda.device_count()
+#   assert (config.loader.global_batch_size
+#           == (config.loader.batch_size
+#               * config.trainer.num_nodes
+#               * num_gpus
+#               * config.trainer.accumulate_grad_batches))
+#   if config.loader.global_batch_size % (
+#     num_gpus * config.trainer.accumulate_grad_batches) != 0:
+#     raise ValueError(
+#       f'Train Batch Size {config.training.batch_size}'
+#       f'not divisible by {num_gpus} gpus with accumulation '
+#       f'{config.trainer.accumulate_grad_batches}.')
+#   if config.loader.eval_global_batch_size % num_gpus != 0:
+#     raise ValueError(
+#       f'Eval Batch Size for {config.eval.batch_size} '
+#       f'not divisible by {num_gpus}.')
   
-  if True: ### GET ON THIS LINE ###
-    from safe_tokenizer import get_safe_dataset
-    dataset = get_safe_dataset(
-      config.data.train,
-      tokenizer = tokenizer,
-      cache_dir = config.data.cache_dir,
-      streaming = False,
-      tokenize_column = "input",
-      property_column = None,
-      max_length = None,
-    )
-    train_set = dataset['train']
-    valid_set = dataset['valid']
+#   if True: ### GET ON THIS LINE ###
+#     from safe_tokenizer import get_safe_dataset
+#     dataset = get_safe_dataset(
+#       config.data.train,
+#       tokenizer = tokenizer,
+#       cache_dir = config.data.cache_dir,
+#       streaming = False,
+#       tokenize_column = "input",
+#       property_column = None,
+#       max_length = None,
+#     )
+#     train_set = dataset['train']
+#     valid_set = dataset['valid']
     
-  else:
-    if skip_train:
-      train_set = None
-    else:
-      train_set = get_dataset(
-        config.data.train,
-        tokenizer,
-        mode='train',
-        wrap=config.data.wrap,
-        cache_dir=config.data.cache_dir,
-        block_size=config.model.length)
+#   else:
+#     if skip_train:
+#       train_set = None
+#     else:
+#       train_set = get_dataset(
+#         config.data.train,
+#         tokenizer,
+#         mode='train',
+#         wrap=config.data.wrap,
+#         cache_dir=config.data.cache_dir,
+#         block_size=config.model.length)
     
-    if config.data.valid in ['text8', 'lm1b', 'ag_news']:
-      validation_split = 'test'
-    else:
-      validation_split = 'validation'
-    if skip_valid:
-      valid_set = None
-    else:
-      valid_set = get_dataset(
-        config.data.valid,
-        tokenizer,
-        wrap=config.data.wrap,
-        mode=validation_split,
-        cache_dir=config.data.cache_dir,
-        block_size=config.model.length,
-        streaming=False)
+#     if config.data.valid in ['text8', 'lm1b', 'ag_news']:
+#       validation_split = 'test'
+#     else:
+#       validation_split = 'validation'
+#     if skip_valid:
+#       valid_set = None
+#     else:
+#       valid_set = get_dataset(
+#         config.data.valid,
+#         tokenizer,
+#         wrap=config.data.wrap,
+#         mode=validation_split,
+#         cache_dir=config.data.cache_dir,
+#         block_size=config.model.length,
+#         streaming=False)
 
-  if skip_train:
-    train_loader = None
-  else:
-    train_loader = torch.utils.data.DataLoader(
-      train_set,
-      batch_size=config.loader.batch_size,
-      num_workers=config.loader.num_workers,
-      pin_memory=config.loader.pin_memory,
-      shuffle=not config.data.streaming,
-      persistent_workers=True)
-    train_loader.tokenizer = tokenizer
-  if skip_valid:
-    valid_loader = None
-  else:
-    if valid_seed is None:
-      shuffle_valid = False
-      generator = None
-    else:
-      shuffle_valid = True
-      generator = torch.Generator().manual_seed(valid_seed)
-    valid_loader = torch.utils.data.DataLoader(
-      valid_set,
-      batch_size=config.loader.eval_batch_size,
-      num_workers=config.loader.num_workers,
-      pin_memory=config.loader.pin_memory,
-      shuffle=shuffle_valid,
-      generator=generator)
-    # Will be used in generative perplexity calculation
-    valid_loader.tokenizer = tokenizer
+#   if skip_train:
+#     train_loader = None
+#   else:
+#     train_loader = torch.utils.data.DataLoader(
+#       train_set,
+#       batch_size=config.loader.batch_size,
+#       num_workers=config.loader.num_workers,
+#       pin_memory=config.loader.pin_memory,
+#       shuffle=not config.data.streaming,
+#       persistent_workers=True)
+#     train_loader.tokenizer = tokenizer
+#   if skip_valid:
+#     valid_loader = None
+#   else:
+#     if valid_seed is None:
+#       shuffle_valid = False
+#       generator = None
+#     else:
+#       shuffle_valid = True
+#       generator = torch.Generator().manual_seed(valid_seed)
+#     valid_loader = torch.utils.data.DataLoader(
+#       valid_set,
+#       batch_size=config.loader.eval_batch_size,
+#       num_workers=config.loader.num_workers,
+#       pin_memory=config.loader.pin_memory,
+#       shuffle=shuffle_valid,
+#       generator=generator)
+#     # Will be used in generative perplexity calculation
+#     valid_loader.tokenizer = tokenizer
 
-  return train_loader, valid_loader
+#   return train_loader, valid_loader
 
 
 # Samplers adapted from: https://github.com/Dao-AILab/flash-attention/blob/main/training/src/datamodules/fault_tolerant_sampler.py
